@@ -383,6 +383,6 @@ if __name__ == "__main__":
          opt.step()
 
          epoch_loss += float(loss)
-      sys.stderr.write('Loss: %f\n' % epoch_loss)
+      sys.stderr.write('Epoch %d, loss: %f\n' % (epoch+1, epoch_loss))
       if (epoch+1) % 10 == 0:
-         torch.save(model.state_dict(), 'model_epoch_%d.tch' % epoch)
+         torch.save(model.state_dict(), 'model_epoch_%d.tch' % (epoch+1))
