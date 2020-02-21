@@ -264,7 +264,7 @@ class EncoderDecoder(nn.Module):
       # Prepend symbol 0 and shift sequences right.
       N = batch.shape[0] # Batch size.
       start = torch.zeros(N,1, dtype=torch.long, device=batch.device)
-      return torch.cat([start, batch[:,1:]], dim=-1)
+      return torch.cat([start, batch[:,:-1]], dim=-1)
 
    def forward(self, i_batch, o_batch, mask=None):
       # Apply input and output embeddings.
@@ -281,7 +281,7 @@ class EncoderDecoder(nn.Module):
       for layer in self.DecoderLayers:
          o = layer(o,i)
 
-      return self.last(o.float())
+      return self.last(o)
 
 
 '''
@@ -330,26 +330,25 @@ if __name__ == "__main__":
 
    model = EncoderDecoder(
       N = 2,         # number of layers.
-      h = 8,         # Number of attention heads.
+      h = 4,         # Number of attention heads.
       d_model = 128, # Hidden dimension.
       d_ffn = 256,   # Boom dimension.
       i_nwrd = 5,    # Input alphabet (DNA).
       o_nwrd = 22    # Output alphabet (protein).
    )
 
-   # Do it in half precision and with CUDA if possible.
+   model.load_state_dict(torch.load('model_epoch_20.tch'))
+
+   # Do it with CUDA if possible.
    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-   try:
-      model.cuda()
-   except:
-      pass
+   if device == 'cuda': model.cuda()
    
    lr  = 0.001 # The celebrated learning rate.
    per = 512  # Half period of the cyclic learning rate.
 
    # Optimizer (warmup and linear decay or LR)
    opt = Lamb(model.parameters(),
-         lr=0.01, weight_decay=0.01, betas=(.9, .999), adam=True)
+         lr=lr, weight_decay=0.01, betas=(.9, .999), adam=True)
 
    loss_fun = nn.CrossEntropyLoss(reduction='mean')
    lrval = list(range(per)) + list(range(per,0,-1))
@@ -358,13 +357,11 @@ if __name__ == "__main__":
    for epoch in range(20):
       epoch_loss = 0.
       # Learning rate decay.
-      if epoch >= 10:
-         lr = 0.0002
+      if epoch >= 10: lr = 0.0001
       for batch in range(256):
          nbtch += 1
          # Change the learning rate (cycles).
          opt.param_groups[0]['lr'] = lr * lrval[nbtch % (2*per)] / per
-
 
          # Generate the batch data on the fly. Take 32 DNA sequences
          # of size 72 and translate them into proteins of size 24.
@@ -383,6 +380,7 @@ if __name__ == "__main__":
          opt.step()
 
          epoch_loss += float(loss)
+
       sys.stderr.write('Epoch %d, loss: %f\n' % (epoch+1, epoch_loss))
       if (epoch+1) % 10 == 0:
          torch.save(model.state_dict(), 'model_epoch_%d.tch' % (epoch+1))
