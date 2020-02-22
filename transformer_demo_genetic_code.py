@@ -140,9 +140,9 @@ class RelativeAttention(nn.Module):
       k = torch.matmul(Y, self.We).view(N,L2,h,-1).transpose(1,2)
       v = torch.matmul(Y, self.Wv).view(N,L2,h,-1).transpose(1,2)
       # Note: Q is not the query (see p. 12 of Transformer-XL).
-      Q = torch.matmul(R, self.Wr).view(1,-1,h,H).transpose(1,2).repeat(N,1,1,1)
+      Q = torch.matmul(R, self.Wr).view(1,-1,h,H).transpose(1,2)
 
-      # Reshape.
+      # Reshapes.
       pb = self.pb.view(1,h,1,-1).repeat(N,1,L1,1)
       cb = self.cb.view(1,h,1,-1).repeat(N,1,L1,1)
 
