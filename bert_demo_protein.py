@@ -44,7 +44,7 @@ class RelativeAttention(nn.Module):
 
    def __init__(self, h, d_model, dropout=0.1):
       assert d_model % h == 0 # Just to be sure.
-      super(RelativeAttention, self).__init__()
+      super().__init__()
       self.h = h
       self.d = d_model
 
@@ -146,7 +146,7 @@ class RelativeAttention(nn.Module):
       pb = self.pb.view(1,h,1,-1).repeat(N,1,L1,1)
       cb = self.cb.view(1,h,1,-1).repeat(N,1,L1,1)
 
-      # Dot products 
+      # Dot products.
       B   = torch.matmul(q,  Q.transpose(-2,-1))
       D   = torch.matmul(pb, Q.transpose(-2,-1))
       A_a = torch.matmul(q,  k.transpose(-2,-1))
@@ -164,16 +164,16 @@ class RelativeAttention(nn.Module):
       if mask is not None:
          A = A.masked_fill(mask == 0, float('-inf'))
 
-      # Attention softmax
+      # Attention softmax.
       p_attn = F.softmax(A, dim=-1)
 
-      # Apply attention to v
-      Oh = torch.einsum('ijkl,ijlm->ijkm', (p_attn, v))
+      # Apply attention to v.
+      Oh = torch.matmul(p_attn, v)
 
-      # Concatenate attention output
+      # Concatenate attention output.
       O = Oh.transpose(1,2).contiguous().view_as(X)
 
-      # Layer norm and residual connection
+      # Layer norm and residual connection.
       return self.ln(X + self.do(self.Wo(O)))
 
 
@@ -183,7 +183,7 @@ Feed foward layer.
 
 class FeedForwardNet(nn.Module):
    def __init__(self, d_model, d_ffn, dropout=0.1):
-      super(FeedForwardNet, self).__init__()
+      super().__init__()
       self.ff = nn.Sequential(
          nn.Linear(d_model, d_ffn),
          nn.ReLU(),
@@ -192,8 +192,8 @@ class FeedForwardNet(nn.Module):
       self.do = nn.Dropout(p=dropout)
       self.ln = nn.LayerNorm(d_model)
 
-   def forward(self, x):
-      return self.ln(x + self.do(self.ff(x)))
+   def forward(self, X):
+      return self.ln(X + self.do(self.ff(X)))
    
 
 ''' 
@@ -202,7 +202,7 @@ Encoder and Decoder blocks.
 
 class RelativeEncoderBlock(nn.Module):
    def __init__(self, h, d_model, d_ffn, dropout=0.1):
-      super(RelativeEncoderBlock, self).__init__()
+      super().__init__()
       self.h = h
       self.d = d_model
       self.f = d_ffn
@@ -215,7 +215,7 @@ class RelativeEncoderBlock(nn.Module):
 
 class BERT(nn.Module):
    def __init__(self, N, h, d_model, d_ffn, nwrd, dropout=0.1):
-      super(BERT, self).__init__()
+      super().__init__()
 
       # Model parameters.
       self.N = N          # Number of encoders.
@@ -233,7 +233,7 @@ class BERT(nn.Module):
                for _ in range(N)])
 
       # Final layers for reconstruction.
-      self.last  = nn.Sequential(
+      self.last = nn.Sequential(
          nn.Linear(d_model, d_model),
          nn.ReLU(),
          nn.LayerNorm(d_model),
@@ -242,14 +242,14 @@ class BERT(nn.Module):
 
    def forward(self, batch, mask=None):
       # Straightforward pass through the layers.
-      x = self.do(self.embed(batch))
+      X = self.do(self.embed(batch))
       for layer in self.EncoderLayers:
-         x = layer(x)
-      return self.last(x)
+         X = layer(X)
+      return self.last(X)
 
 
 '''
-Proteins
+Proteins.
 '''
 
 vocab = {
@@ -281,6 +281,9 @@ class SeqData:
 
 
 if __name__ == "__main__":
+
+   if sys.version_info < (3,0):
+      sys.stderr.write("Requires Python 3\n")
 
    model = BERT(
       N = 4,             # Number of layers.
