@@ -25,7 +25,7 @@ class SingleHeadAttention(nn.Module):
       self.ks = nn.Parameter(torch.zeros(d_model, dtype=torch.float))
       self.vs = nn.Parameter(torch.zeros(d_model, dtype=torch.float))
 
-      # Input projections.
+      # Query projection.
       self.Q = nn.Sequential(
          nn.Linear(d_model, d_model),
          nn.LayerNorm(d_model)
@@ -39,13 +39,14 @@ class SingleHeadAttention(nn.Module):
       self.ln = nn.LayerNorm(d_model)
 
    def ovrprm(self, x):
+      # Cast onto the range (-1,1).
       a, b = self.ov(x).split(self.d, dim=-1)
       return torch.sigmoid(a) * torch.tanh(b)
 
    def forward(self, X, Y, mask=None):
-      
+      # Process input. 
       q = self.Q(X) * torch.sigmoid(self.qs)
-      k = X * torch.sigmoid(self.ks)
+      k = Y * torch.sigmoid(self.ks)
       v = Y * self.ovrprm(torch.sigmoid(self.vs))
       
       # Dot product attention.
@@ -88,7 +89,8 @@ class BoomLayer(nn.Module):
 Encoder and Decoder blocks.
 '''
 
-class EncoderBlock(nn.Module):
+
+class EncoderAttnBlock(nn.Module):
    def __init__(self, d_model, d_ffn, dropout=0.1):
       super().__init__()
       self.d = d_model
@@ -103,11 +105,12 @@ class EncoderBlock(nn.Module):
       self.ffn   = BoomLayer(d_model, d_ffn, dropout=dropout)
       
    def forward(self, X, mask=None):
-      x,_ = self.lstm(X)             # LSTM layer.
-      X   = self.ln(self.do(x) + X)  # Residual connection.
-      X,Y = self.lnq(X), self.lnk(X) # Split and normalize.
-      X   = self.sattn(X, Y, mask)   # Self attention.
-      return self.ffn(X)             # Boom layer.
+      X,_ = self.lstm(X)              # LSTM (no residual).
+      X   = self.do(X)                # Dropout.
+      X,Y = self.lnq(X), self.lnk(X)  # Split and normalize.
+      X   = self.sattn(X, Y, mask)    # Self attention.
+      X   = self.ffn(X)               # Boom layer.
+      return X
 
 
 class SHARNN(nn.Module):
@@ -125,17 +128,25 @@ class SHARNN(nn.Module):
 
       # Self-attention layers
       self.EncoderLayers = nn.ModuleList([
-         EncoderBlock(d_model, d_ffn, dropout=dropout) \
+         EncoderAttnBlock(d_model, d_ffn, dropout=dropout) \
                for _ in range(N)])
 
-      # Final layers for reconstruction.
+      # Final layer for reconstruction.
       self.last = nn.Linear(d_model, nwrd)
 
+   def default_mask(self, X):
+      # By default we mask the future.
+      # Note: the positions marked as 0 are masked.
+      L = X.shape[-2] # Text length.
+      return torch.ones(L,L, device=X.device).tril()
+      
    def forward(self, batch, mask=None):
       # Straightforward pass through the layers.
       X = self.do(self.embed(batch))
+      # Note: masking is critical in this model.
+      mask = mask if mask is not None else self.default_mask(X)
       for layer in self.EncoderLayers:
-         X = layer(X)
+         X = layer(X, mask)
       return self.last(X)
 
 
@@ -180,8 +191,6 @@ if __name__ == "__main__":
       nwrd = len(vocab)  # Output alphabet (protein).
    )
 
-   #model.load_state_dict(torch.load('model_epoch_10.tch'))
-
    protdata = SeqData('proteins.txt', vocab)
    mask_symbol = len(vocab)-1 # The last symbol is the mask.
 
@@ -189,7 +198,7 @@ if __name__ == "__main__":
    device = 'cuda' if torch.cuda.is_available() else 'cpu'
    if device == 'cuda': model.cuda()
    
-   lr  = 0.01 # The celebrated learning rate.
+   lr  = 0.001 # The celebrated learning rate.
    per = 512  # Half period of the cyclic learning rate.
 
    # Optimizer (warmup and linear decay or LR)
@@ -207,11 +216,12 @@ if __name__ == "__main__":
          # Change the learning rate (cycles).
          opt.param_groups[0]['lr'] = lr * lrval[nbtch % (2*per)] / per
 
-         batch = batch.to(device)
          rnd = lambda n: [random.randint(1,20) for _ in range(n)]
 
          # Choose symbols to guess (15%).
-         guess_pos = torch.rand(size=batch.shape) < 0.15
+         guess_pos = (torch.rand(batch.shape) < 0.15) & (batch > 0)
+         # Record original symbols (targets).
+         batch = batch.to(device)
          trgt = batch[guess_pos].clone()
          # BERT masked language model (MLM) protcol:
          # 80% mask, 10% random, 10% unchanged.
@@ -231,5 +241,5 @@ if __name__ == "__main__":
          epoch_loss += float(loss)
 
       sys.stderr.write('Epoch %d, loss: %f\n' % (epoch+1, epoch_loss))
-      if (epoch+1) % 10 == 0:
+      if (epoch+1) % 2 == 0:
          torch.save(model.state_dict(), 'model_epoch_%d.tch' % (epoch+1))

@@ -318,11 +318,12 @@ if __name__ == "__main__":
          # Change the learning rate (cycles).
          opt.param_groups[0]['lr'] = lr * lrval[nbtch % (2*per)] / per
 
-         batch = batch.to(device)
          rnd = lambda n: [random.randint(1,20) for _ in range(n)]
 
          # Choose symbols to guess (15%).
-         guess_pos = torch.rand(size=batch.shape) < 0.15
+         guess_pos = (torch.rand(batch.shape) < 0.15) & (batch > 0)
+         # Record original symbols (targets).
+         batch = batch.to(device)
          trgt = batch[guess_pos].clone()
          # BERT masked language model (MLM) protcol:
          # 80% mask, 10% random, 10% unchanged.
