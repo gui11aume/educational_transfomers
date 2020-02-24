@@ -185,7 +185,7 @@ class SeqData:
 if __name__ == "__main__":
 
    model = SHARNN(
-      N = 3,             # Number of layers.
+      N = 4,             # Number of layers.
       d_model = 256,     # Hidden dimension.
       d_ffn = 512,       # Boom dimension.
       nwrd = len(vocab)  # Output alphabet (protein).
@@ -241,5 +241,5 @@ if __name__ == "__main__":
          epoch_loss += float(loss)
 
       sys.stderr.write('Epoch %d, loss: %f\n' % (epoch+1, epoch_loss))
-      if (epoch+1) % 2 == 0:
+      if (epoch+1) % 10 == 0:
          torch.save(model.state_dict(), 'model_epoch_%d.tch' % (epoch+1))
