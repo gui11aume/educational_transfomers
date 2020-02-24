@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from optimizers import Lamb # Local file.
+from optimizers import Lamb, Lookahead # Local file.
 
 
 '''
@@ -269,7 +269,7 @@ class SeqData:
       with open(path) as f:
          self.data = [line.rstrip() for line in f if is_clean(line)]
 
-   def batches(self, btchsz=32, randomize=True):
+   def batches(self, btchsz=64, randomize=True):
       # Produce batches in index format (i.e. not text).
       idx = np.arange(len(self.data))
       if randomize: np.random.shuffle(idx)
@@ -300,23 +300,20 @@ if __name__ == "__main__":
    device = 'cuda' if torch.cuda.is_available() else 'cpu'
    if device == 'cuda': model.cuda()
    
-   lr  = 0.001 # The celebrated learning rate.
-   per = 512  # Half period of the cyclic learning rate.
+   lr  = 0.0001 # The celebrated learning rate.
 
-   # Optimizer (warmup and linear decay or LR)
-   opt = Lamb(model.parameters(),
+   # Optimizer (Lookahead with Lamb).
+   baseopt = Lamb(model.parameters(),
          lr=lr, weight_decay=0.01, betas=(.9, .999), adam=True)
+   opt = Lookahead(base_optimizer=baseopt, k=5, alpha=0.8)
 
    loss_fun = nn.CrossEntropyLoss(reduction='mean')
-   lrval = list(range(per)) + list(range(per,0,-1))
 
    nbtch = 0
    for epoch in range(20):
       epoch_loss = 0.
       for batch in protdata.batches():
          nbtch += 1
-         # Change the learning rate (cycles).
-         opt.param_groups[0]['lr'] = lr * lrval[nbtch % (2*per)] / per
 
          rnd = lambda n: [random.randint(1,20) for _ in range(n)]
 

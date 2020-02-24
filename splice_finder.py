@@ -285,16 +285,14 @@ if __name__ == "__main__":
    )
 
    splicedata = SeqData('GT.txt', vocab)
-   #model.load_state_dict(torch.load('model_epoch_3.tch'))
 
    # Do it with CUDA if possible.
    device = 'cuda' if torch.cuda.is_available() else 'cpu'
    if device == 'cuda': model.cuda()
    
    lr  = 0.0001 # The celebrated learning rate.
-   per = 512  # Half period of the cyclic learning rate.
 
-   # Optimizer (warmup and linear decay or LR)
+   # Optimizer (Lookahead with Lamb).
    baseopt = Lamb(model.parameters(),
          lr=lr, weight_decay=0.01, betas=(.9, .999), adam=True)
    opt = Lookahead(base_optimizer=baseopt, k=5, alpha=0.8)
@@ -302,7 +300,6 @@ if __name__ == "__main__":
    # Give weight 50 to class 1 (junction: yes). Explanation below.
    clweight = torch.tensor([1.,50.]).to(device)
    loss_fun = nn.CrossEntropyLoss(weight=clweight, reduction='mean')
-   lrval = list(range(per)) + list(range(per,0,-1))
 
    nbtch = 0
    for epoch in range(20):
@@ -312,9 +309,8 @@ if __name__ == "__main__":
 
          # Shift sequences by up to 50 bp.
          shift = [random.randint(0,49) for _ in range(batch.shape[0])]
-         trgt = torch.zeros(batch.shape, dtype=torch.long, device=device)
+         trgt = torch.zeros(batch.shape).long().to(device)
          trgt[:,148] = 1 # The "GT" junction is always at position 148.
-         import pdb; pdb.set_trace()
          shft_batch = [batch[i:i+1,s:s+250] for i,s in enumerate(shift)]
          shft_trgt = [trgt[i:i+1,s:s+250] for i,s in enumerate(shift)]
 
