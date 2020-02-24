@@ -7,6 +7,44 @@ import torch.nn.functional as F
 
 from lamb import Lamb # Local file.
 
+# Copy pasta.
+import itertools as it
+from torch.optim import Optimizer
+
+class Lookahead(Optimizer):
+    def __init__(self, base_optimizer,alpha=0.5, k=6):
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f'Invalid slow update rate: {alpha}')
+        if not 1 <= k:
+            raise ValueError(f'Invalid lookahead steps: {k}')
+        self.optimizer = base_optimizer
+        self.param_groups = self.optimizer.param_groups
+        self.alpha = alpha
+        self.k = k
+        for group in self.param_groups:
+            group["step_counter"] = 0
+        self.slow_weights = [[p.clone().detach() for p in group['params']]
+                                for group in self.param_groups]
+
+        for w in it.chain(*self.slow_weights):
+            w.requires_grad = False
+
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            loss = closure()
+        loss = self.optimizer.step()
+        for group,slow_weights in zip(self.param_groups,self.slow_weights):
+            group['step_counter'] += 1
+            if group['step_counter'] % self.k != 0:
+                continue
+            for p,q in zip(group['params'],slow_weights):
+                if p.grad is None:
+                    continue
+                q.data.add_(self.alpha,p.data - q.data)
+                p.data.copy_(q.data)
+        return loss
+
 
 '''
 Relative positional encoding.
@@ -213,7 +251,7 @@ class RelativeEncoderBlock(nn.Module):
       return self.ffn(self.sattn(X, X, mask))
 
 
-class BERT(nn.Module):
+class SpliceFinder(nn.Module):
    def __init__(self, N, h, d_model, d_ffn, nwrd, dropout=0.1):
       super().__init__()
 
@@ -233,12 +271,7 @@ class BERT(nn.Module):
                for _ in range(N)])
 
       # Final layers for reconstruction.
-      self.last = nn.Sequential(
-         nn.Linear(d_model, d_model),
-         nn.ReLU(),
-         nn.LayerNorm(d_model),
-         nn.Linear(d_model, nwrd)
-      )
+      self.last = nn.Linear(d_model, 2)
 
    def forward(self, batch, mask=None):
       # Straightforward pass through the layers.
@@ -249,14 +282,11 @@ class BERT(nn.Module):
 
 
 '''
-Proteins.
+DNA.
 '''
 
 vocab = {
-   ' ':0,  'A':1,  'C':2,  'D':3,  'E':4,  'F':5,  'G':6,
-   'H':7,  'I':8,  'K':9,  'L':10, 'M':11, 'N':12, 'P':13,
-   'Q':14, 'R':15, 'S':16, 'T':17, 'V':18, 'W':19, 'Y':20,
-   '_':21, '*':22, # '_' = STOP, '*' = MASK.
+   ' ':0, 'A':1, 'C':2, 'G':3, 'T':4, 'a':1, 'c':2, 'g':3, 't':4,
 }
 
 
@@ -269,7 +299,7 @@ class SeqData:
       with open(path) as f:
          self.data = [line.rstrip() for line in f if is_clean(line)]
 
-   def batches(self, btchsz=32, randomize=True):
+   def batches(self, btchsz=64, randomize=True):
       # Produce batches in index format (i.e. not text).
       idx = np.arange(len(self.data))
       if randomize: np.random.shuffle(idx)
@@ -285,55 +315,59 @@ if __name__ == "__main__":
    if sys.version_info < (3,0):
       sys.stderr.write("Requires Python 3\n")
 
-   model = BERT(
+   model = SpliceFinder(
       N = 4,             # Number of layers.
       h = 8,             # Number of attention heads.
       d_model = 256,     # Hidden dimension.
       d_ffn = 512,       # Boom dimension.
-      nwrd = len(vocab)  # Input alphabet (protein).
+      nwrd = len(vocab)  # Input alphabet (DNA).
    )
 
-   protdata = SeqData('proteins.txt', vocab)
-   mask_symbol = len(vocab)-1 # The last symbol is the mask.
+   splicedata = SeqData('GT.txt', vocab)
+   model.load_state_dict(torch.load('model_epoch_1.tch'))
 
    # Do it with CUDA if possible.
    device = 'cuda' if torch.cuda.is_available() else 'cpu'
    if device == 'cuda': model.cuda()
    
-   lr  = 0.001 # The celebrated learning rate.
+   lr  = 0.0001 # The celebrated learning rate.
    per = 512  # Half period of the cyclic learning rate.
 
    # Optimizer (warmup and linear decay or LR)
-   opt = Lamb(model.parameters(),
+   baseopt = Lamb(model.parameters(),
          lr=lr, weight_decay=0.01, betas=(.9, .999), adam=True)
+   opt = Lookahead(base_optimizer=baseopt, k=5, alpha=0.8)
 
-   loss_fun = nn.CrossEntropyLoss(reduction='mean')
+   clweight = torch.tensor([1.,50.]).to(device)
+   loss_fun = nn.CrossEntropyLoss(weight=clweight, reduction='mean')
    lrval = list(range(per)) + list(range(per,0,-1))
 
    nbtch = 0
    for epoch in range(20):
       epoch_loss = 0.
-      for batch in protdata.batches():
+      multi_loss = 0.
+      for batch in splicedata.batches():
+         if (nbtch+1) % 100 == 0:
+            sys.stderr.write('Epoch %d, batch %d loss: %f\n' % (epoch+1, nbtch+1, multi_loss))
+            multi_loss = 0.
          nbtch += 1
+         #if nbtch >= 2000: lr = 0.0001
          # Change the learning rate (cycles).
-         opt.param_groups[0]['lr'] = lr * lrval[nbtch % (2*per)] / per
+         #opt.param_groups[0]['lr'] = lr * lrval[nbtch % (2*per)] / per
 
-         rnd = lambda n: [random.randint(1,20) for _ in range(n)]
+         # Shift sequences by up to 50 bp.
+         shift = [random.randint(0,49) for _ in range(batch.shape[0])]
+         trgt = torch.zeros(batch.shape, dtype=torch.long, device=device)
+         trgt[:,148] = 1
+         batch = torch.nn.utils.rnn.pad_sequence([batch[i,shift[i]:shift[i]+250] for i in range(len(shift))], batch_first=True)
+         trgt = torch.nn.utils.rnn.pad_sequence([trgt[i,shift[i]:shift[i]+250] for i in range(len(shift))], batch_first=True)
 
-         # Choose symbols to guess (15%).
-         guess_pos = (torch.rand(batch.shape) < 0.15) & (batch > 0)
-         # Record original symbols (targets).
          batch = batch.to(device)
-         trgt = batch[guess_pos].clone()
-         # BERT masked language model (MLM) protcol:
-         # 80% mask, 10% random, 10% unchanged.
-         rnd_pos = guess_pos & (torch.rand(size=batch.shape) < 0.5)
-         msk_pos = guess_pos & (torch.rand(size=batch.shape) < 0.8)
-         batch[rnd_pos] = torch.tensor(rnd(torch.sum(rnd_pos))).to(device)
-         batch[msk_pos] = mask_symbol
+         trgt = trgt.to(device)
 
+         import pdb; pdb.set_trace()
          z = model(batch)
-         loss = loss_fun(z[guess_pos], trgt)
+         loss = loss_fun(z.narrow(1,99,50).contiguous().view(-1,2), trgt.narrow(1,99,50).contiguous().view(-1))
 
          # Update.
          opt.zero_grad()
@@ -341,7 +375,8 @@ if __name__ == "__main__":
          opt.step()
 
          epoch_loss += float(loss)
+         multi_loss += float(loss)
 
       sys.stderr.write('Epoch %d, loss: %f\n' % (epoch+1, epoch_loss))
-      if (epoch+1) % 10 == 0:
+      if (epoch+1) % 1 == 0:
          torch.save(model.state_dict(), 'model_epoch_%d.tch' % (epoch+1))
