@@ -5,46 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from lamb import Lamb # Local file.
-
-# Copy pasta.
-import itertools as it
-from torch.optim import Optimizer
-
-class Lookahead(Optimizer):
-    def __init__(self, base_optimizer,alpha=0.5, k=6):
-        if not 0.0 <= alpha <= 1.0:
-            raise ValueError(f'Invalid slow update rate: {alpha}')
-        if not 1 <= k:
-            raise ValueError(f'Invalid lookahead steps: {k}')
-        self.optimizer = base_optimizer
-        self.param_groups = self.optimizer.param_groups
-        self.alpha = alpha
-        self.k = k
-        for group in self.param_groups:
-            group["step_counter"] = 0
-        self.slow_weights = [[p.clone().detach() for p in group['params']]
-                                for group in self.param_groups]
-
-        for w in it.chain(*self.slow_weights):
-            w.requires_grad = False
-
-    def step(self, closure=None):
-        loss = None
-        if closure is not None:
-            loss = closure()
-        loss = self.optimizer.step()
-        for group,slow_weights in zip(self.param_groups,self.slow_weights):
-            group['step_counter'] += 1
-            if group['step_counter'] % self.k != 0:
-                continue
-            for p,q in zip(group['params'],slow_weights):
-                if p.grad is None:
-                    continue
-                q.data.add_(self.alpha,p.data - q.data)
-                p.data.copy_(q.data)
-        return loss
-
+from optimizers import Lamb, Lookahead # Local file.
 
 '''
 Relative positional encoding.
@@ -162,7 +123,7 @@ class RelativeAttention(nn.Module):
            Oh  ~  (Batch, h, d_model/h, L)
             O  ~  (Batch, L, d_model)
       '''
-
+      
       h  = self.h       # Number of heads.
       H  = self.d // h  # Head dimension.
       N  = X.shape[0]   # Batch size.
@@ -324,7 +285,7 @@ if __name__ == "__main__":
    )
 
    splicedata = SeqData('GT.txt', vocab)
-   model.load_state_dict(torch.load('model_epoch_1.tch'))
+   #model.load_state_dict(torch.load('model_epoch_3.tch'))
 
    # Do it with CUDA if possible.
    device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -338,6 +299,7 @@ if __name__ == "__main__":
          lr=lr, weight_decay=0.01, betas=(.9, .999), adam=True)
    opt = Lookahead(base_optimizer=baseopt, k=5, alpha=0.8)
 
+   # Give weight 50 to class 1 (junction: yes). Explanation below.
    clweight = torch.tensor([1.,50.]).to(device)
    loss_fun = nn.CrossEntropyLoss(weight=clweight, reduction='mean')
    lrval = list(range(per)) + list(range(per,0,-1))
@@ -345,29 +307,26 @@ if __name__ == "__main__":
    nbtch = 0
    for epoch in range(20):
       epoch_loss = 0.
-      multi_loss = 0.
       for batch in splicedata.batches():
-         if (nbtch+1) % 100 == 0:
-            sys.stderr.write('Epoch %d, batch %d loss: %f\n' % (epoch+1, nbtch+1, multi_loss))
-            multi_loss = 0.
          nbtch += 1
-         #if nbtch >= 2000: lr = 0.0001
-         # Change the learning rate (cycles).
-         #opt.param_groups[0]['lr'] = lr * lrval[nbtch % (2*per)] / per
 
          # Shift sequences by up to 50 bp.
          shift = [random.randint(0,49) for _ in range(batch.shape[0])]
          trgt = torch.zeros(batch.shape, dtype=torch.long, device=device)
-         trgt[:,148] = 1
-         batch = torch.nn.utils.rnn.pad_sequence([batch[i,shift[i]:shift[i]+250] for i in range(len(shift))], batch_first=True)
-         trgt = torch.nn.utils.rnn.pad_sequence([trgt[i,shift[i]:shift[i]+250] for i in range(len(shift))], batch_first=True)
-
-         batch = batch.to(device)
-         trgt = trgt.to(device)
-
+         trgt[:,148] = 1 # The "GT" junction is always at position 148.
          import pdb; pdb.set_trace()
+         shft_batch = [batch[i:i+1,s:s+250] for i,s in enumerate(shift)]
+         shft_trgt = [trgt[i:i+1,s:s+250] for i,s in enumerate(shift)]
+
+         batch = torch.cat(shft_batch, 0).to(device)
+         trgt = torch.cat(shft_trgt, 0).to(device)
+
          z = model(batch)
-         loss = loss_fun(z.narrow(1,99,50).contiguous().view(-1,2), trgt.narrow(1,99,50).contiguous().view(-1))
+         # Compute loss only in the range where the junction can be.
+         # Those are 50 positions, whence the weight 50 in the loss.
+         guesses = z.narrow(1,99,50).contiguous().view(-1,2)
+         targets = trgt.narrow(1,99,50).contiguous().view(-1)
+         loss = loss_fun(guesses, targets)
 
          # Update.
          opt.zero_grad()
@@ -375,7 +334,6 @@ if __name__ == "__main__":
          opt.step()
 
          epoch_loss += float(loss)
-         multi_loss += float(loss)
 
       sys.stderr.write('Epoch %d, loss: %f\n' % (epoch+1, epoch_loss))
       if (epoch+1) % 1 == 0:

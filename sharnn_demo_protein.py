@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from lamb import Lamb # Local file.
+from optimizers import Lamb # Local file.
 
 '''
 Single head RNN attention.
