@@ -7,7 +7,6 @@ import torch.nn.functional as F
 
 from optimizers import Lamb, Lookahead # Local file.
 
-
 '''
 Relative positional encoding.
 '''
@@ -124,7 +123,7 @@ class RelativeAttention(nn.Module):
            Oh  ~  (Batch, h, d_model/h, L)
             O  ~  (Batch, L, d_model)
       '''
-
+      
       h  = self.h       # Number of heads.
       H  = self.d // h  # Head dimension.
       N  = X.shape[0]   # Batch size.
@@ -193,10 +192,10 @@ class FeedForwardNet(nn.Module):
 
    def forward(self, X):
       return self.ln(X + self.do(self.ff(X)))
-
+   
 
 ''' 
-Encoder and Decoder blocks.
+Encoder blocks.
 '''
 
 class RelativeEncoderBlock(nn.Module):
@@ -212,31 +211,8 @@ class RelativeEncoderBlock(nn.Module):
       return self.ffn(self.sattn(X, X, mask))
 
 
-class RelativeDecoderBlock(nn.Module):
-   def __init__(self, h, d_model, d_ffn, dropout=0.1):
-      super().__init__()
-      self.h = h
-      self.d = d_model
-      self.f = d_ffn
-      self.sattn = RelativeAttention(h, d_model, dropout=dropout)
-      self.oattn = RelativeAttention(h, d_model, dropout=dropout)
-      self.ffn   = FeedForwardNet(d_model, d_ffn, dropout=dropout)
-
-   def default_mask(self, X):
-      # By default we mask the future.
-      # Note: the positions marked as 0 are masked.
-      L = X.shape[-2] # Text length.
-      return torch.ones(L,L, device=X.device).tril()
-      
-   def forward(self, X, Y, mask=None):
-      mask = mask if mask is not None else self.default_mask(X)
-      X = self.sattn(X, X, mask)  # Self (masked) attention.
-      X = self.oattn(X, Y)        # Other (unmasked) attention.
-      return self.ffn(X)
-
-
-class EncoderDecoder(nn.Module):
-   def __init__(self, N, h, d_model, d_ffn, i_nwrd, o_nwrd, dropout=0.1):
+class SeqFinder(nn.Module):
+   def __init__(self, N, h, d_model, d_ffn, nwrd, dropout=0.1):
       super().__init__()
 
       # Model parameters.
@@ -245,87 +221,90 @@ class EncoderDecoder(nn.Module):
       self.h = h          # Number of heads.
       self.d_ffn = d_ffn  # Boom dimension.
 
-      # Text embedding transformations.
-      self.i_emb = nn.Embedding(i_nwrd, d_model)
-      self.o_emb = nn.Embedding(o_nwrd, d_model)
+      # Text embedding transformations
+      self.embed = nn.Embedding(nwrd, d_model)
       self.do    = nn.Dropout(p=dropout)
 
-      # Self-attention layers of the encoder.
+      # Self-attention layers
       self.EncoderLayers = nn.ModuleList([
          RelativeEncoderBlock(h, d_model, d_ffn, dropout=dropout) \
                for _ in range(N)])
-      # Self/other attention layers of the decoder.
-      self.DecoderLayers = nn.ModuleList([
-         RelativeDecoderBlock(h, d_model, d_ffn, dropout=dropout) \
-               for _ in range(N)])
 
-      # Final layer (decoder side) for reconstruction.
-      self.last = nn.Linear(d_model, o_nwrd)
+      # Final layers for reconstruction.
+      self.last = nn.Linear(d_model, 2)
 
-   def shift(self, batch):
-      # Prepend symbol 0 and shift sequences right.
-      N = batch.shape[0] # Batch size.
-      start = torch.LongTensor([DNA_vocab['START']]).to(batch.device)
-      return torch.cat([start.repeat(N,1), batch[:,:-1]], dim=-1)
-
-   def forward(self, i_batch, o_batch, mask=None):
-      # Apply input and output embeddings.
-      i_embeddings = self.i_emb(i_batch)
-      o_embeddings = self.o_emb(self.shift(o_batch))
-
-      i = self.do(i_embeddings)
-      o = self.do(o_embeddings)
-
-      # Attention layers (encoder).
+   def forward(self, batch, mask=None):
+      # Straightforward pass through the layers.
+      X = self.do(self.embed(batch))
       for layer in self.EncoderLayers:
-         i = layer(i)
-      # Attention layers (decoder).
-      for layer in self.DecoderLayers:
-         o = layer(o,i)
-
-      return self.last(o)
+         X = layer(X)
+      return self.last(X)
 
 
 '''
-DNA and proteins
+DNA.
 '''
 
-DNA_vocab  = { ' ': 0, 'A':1, 'C':2, 'G':3, 'T':4, 'START':5 }
+vocab = {
+   ' ':0, 'A':1, 'C':2, 'G':3, 'T':4,
+}
 
-prot_vocab = { ' ':0, 'A':1, 'C':2, 'D':3, 'E':4, 'F':5, 'G':6, 'H':7,
-       'I':8, 'K':9, 'L':10, 'M':11, 'N':12, 'P':13, 'Q':14, 'R':15,
-       'S':16, 'T':17, 'V':18, 'W':19, 'Y':20, '_':21 } # _ = STOP.
 
-def to_idx(seqlist, vocab):
-   # Cast to torch long integers for embeddings.
-   return torch.LongTensor([[vocab[x] for x in seq] for seq in seqlist])
+class SeqData:
 
-def random_DNA(nseq, lseq):
-   DNA = lambda n: ''.join([random.choice('GATC') for _ in range(n)])
-   return [DNA(lseq) for _ in range(nseq)]
+   def __init__(self, path, vocab):
+      self.vocab = vocab
+      # Remove lines with unknown characters.
+      is_clean = lambda s: set(s.rstrip()).issubset(vocab)
+      with open(path) as f:
+         self.data = [line.rstrip() for line in f if is_clean(line)]
 
-def translate(seqlist):
-   table = { 
-        'ATA':'I', 'ATC':'I', 'ATT':'I', 'ATG':'M', 
-        'ACA':'T', 'ACC':'T', 'ACG':'T', 'ACT':'T', 
-        'AAC':'N', 'AAT':'N', 'AAA':'K', 'AAG':'K', 
-        'AGC':'S', 'AGT':'S', 'AGA':'R', 'AGG':'R',                  
-        'CTA':'L', 'CTC':'L', 'CTG':'L', 'CTT':'L', 
-        'CCA':'P', 'CCC':'P', 'CCG':'P', 'CCT':'P', 
-        'CAC':'H', 'CAT':'H', 'CAA':'Q', 'CAG':'Q', 
-        'CGA':'R', 'CGC':'R', 'CGG':'R', 'CGT':'R', 
-        'GTA':'V', 'GTC':'V', 'GTG':'V', 'GTT':'V', 
-        'GCA':'A', 'GCC':'A', 'GCG':'A', 'GCT':'A', 
-        'GAC':'D', 'GAT':'D', 'GAA':'E', 'GAG':'E', 
-        'GGA':'G', 'GGC':'G', 'GGG':'G', 'GGT':'G', 
-        'TCA':'S', 'TCC':'S', 'TCG':'S', 'TCT':'S', 
-        'TTC':'F', 'TTT':'F', 'TTA':'L', 'TTG':'L', 
-        'TAC':'Y', 'TAT':'Y', 'TAA':'_', 'TAG':'_', 
-        'TGC':'C', 'TGT':'C', 'TGA':'_', 'TGG':'W', 
-   }
-   codons = lambda seq: [seq[i:i+3] for i in range(0,len(seq),3)]
-   transl = lambda seq: ''.join([table[cod] for cod in codons(seq)])
-   return [transl(seq) for seq in seqlist]
+   def mutf(self, seq, pm=.15, pd=.15, pi=.15, outlen=200):
+      '''Mutations, deletions and insertions set to 0-0.15 by default.'''
+      # Draw probabilities at random.
+      pm = pm *random.random()
+      pd = pd *random.random()
+      pi = pi *random.random()
+      # Deletions.
+      seq = [a for a in seq if random.random() > pd]
+      # Mutations.
+      M = {'A': 'CGT', 'C': 'AGT', 'G': 'ACT', 'T': 'ACG'}
+      mut = lambda a: a if random.random() > pm else random.choice(M[a])
+      seq = [mut(a) for a in seq]
+      # Insertions (only 1 nucleotide).
+      I = 'ACGT'
+      ins = lambda a: a if random.random() > pi else a + random.choice(I)
+      seq = [ins(a) for a in seq]
+      # Shift within 'outlen'.
+      seq = ''.join(seq)
+      half1 = len(seq)//2
+      half2 = (len(seq)+1)//2
+      pos = random.randint(0,outlen-1) # Position of the sequence center.
+      prefix = [random.choice(I) for _ in range(pos-half1)]
+      suffix = [random.choice(I) for _ in range(outlen-pos-half2)]
+      if pos < half1:
+         seqf = seq[half1-pos:] + ''.join(suffix)
+         posf = [1] * len(seq[half1-pos:]) + [0] * len(suffix)
+      elif pos > outlen-half2:
+         seqf = ''.join(prefix) + seq[:outlen-pos-half2]
+         posf = [0] * len(prefix) + [1] * len(seq[:outlen-pos-half2])
+      else: # The sequence fits completely.
+         seqf = ''.join(prefix) + seq + ''.join(suffix)
+         posf = [0] * len(prefix) + [1] * len(seq) + [0] * len(suffix)
+      return seqf, torch.LongTensor([posf])
+
+   def batches(self, pm=.15, pd=.15, pi=.15, btchsz=64):
+      '''Mutations, deletions and insertions set to 0-0.15 by default.'''
+      # Produce batches in index format (i.e. not text).
+      idx = np.arange(len(self.data))
+      to_idx = lambda s: torch.LongTensor([[self.vocab[a] for a in s]])
+      # Define a generator for convenience.
+      for _ in range(512):
+         rndset = random.choices(self.data, k=btchsz)
+         pairs = [self.mutf(seq, pm, pd, pi) for seq in rndset]
+         seqf = torch.cat([to_idx(seq) for seq,_ in pairs], dim=0)
+         posf = torch.cat([z for _,z in pairs], dim=0)
+         yield seqf, posf
 
 
 if __name__ == "__main__":
@@ -333,14 +312,15 @@ if __name__ == "__main__":
    if sys.version_info < (3,0):
       sys.stderr.write("Requires Python 3\n")
 
-   model = EncoderDecoder(
-      N = 2,                    # Number of layers.
-      h = 4,                    # Number of attention heads.
-      d_model = 128,            # Hidden dimension.
-      d_ffn = 256,              # Boom dimension.
-      i_nwrd = len(DNA_vocab),  # Input alphabet (DNA).
-      o_nwrd = len(prot_vocab)  # Output alphabet (protein).
+   model = SeqFinder(
+      N = 4,             # Number of layers.
+      h = 8,             # Number of attention heads.
+      d_model = 256,     # Hidden dimension.
+      d_ffn = 512,       # Boom dimension.
+      nwrd = len(vocab)  # Input alphabet (DNA).
    )
+
+   tRNAdata = SeqData('yeast_tRNA.txt', vocab)
 
    # Do it with CUDA if possible.
    device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -348,31 +328,28 @@ if __name__ == "__main__":
    
    lr  = 0.0001 # The celebrated learning rate.
 
-   # Optimizer (Lookahead with Lamb).
+   # Optimizer (warmup and linear decay or LR)
    baseopt = Lamb(model.parameters(),
          lr=lr, weight_decay=0.01, betas=(.9, .999), adam=True)
    opt = Lookahead(base_optimizer=baseopt, k=5, alpha=0.8)
 
-   loss_fun = nn.CrossEntropyLoss(reduction='mean')
+   clweight = torch.tensor([1.,3.]).to(device)
+   loss_fun = nn.CrossEntropyLoss(weight=clweight, reduction='mean')
 
    nbtch = 0
-   for epoch in range(20):
+   for epoch in range(50):
       epoch_loss = 0.
-      # Learning rate decay.
-      if epoch >= 10: lr = 0.0001
-      for batch in range(256):
+      for seq,pos in tRNAdata.batches():
          nbtch += 1
 
-         # Generate the batch data on the fly. Take 32 DNA sequences
-         # of size 72 and translate them into proteins of size 24.
-         DNA = random_DNA(32, 72)
-         prot = translate(DNA)
-         
-         i_batch = to_idx(DNA, DNA_vocab).to(device)
-         o_batch = to_idx(prot, prot_vocab).to(device)
+         # Add equal amount of random sequences.
+         rndseq = torch.LongTensor(seq.shape).random_(1,5)
+         batch = torch.cat([seq, rndseq], dim=0).to(device)
+         randz = torch.zeros(seq.shape).long().to(device)
+         trgt = torch.cat([pos.to(device), randz], dim=0)
 
-         z = model(i_batch, o_batch)
-         loss = loss_fun(z.view(-1,len(prot_vocab)), o_batch.view(-1))
+         z = model(batch)
+         loss = loss_fun(z.view(-1,2), trgt.view(-1))
 
          # Update.
          opt.zero_grad()
@@ -383,4 +360,4 @@ if __name__ == "__main__":
 
       sys.stderr.write('Epoch %d, loss: %f\n' % (epoch+1, epoch_loss))
       if (epoch+1) % 10 == 0:
-         torch.save(model.state_dict(), 'transl_model_epoch_%d.tch' % (epoch+1))
+         torch.save(model.state_dict(), 't_RNA_model_epoch_%d.tch' % (epoch+1))
