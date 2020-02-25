@@ -129,10 +129,9 @@ class RelativeAttention(nn.Module):
       N  = X.shape[0]   # Batch size.
       L1 = X.shape[1]   # Text length (X).
       L2 = Y.shape[1]   # Text length (Y).
-      L  = max(L1, L2)  # Longer text length.
 
       # Relative position.
-      R = matrixR(L, self.d, ex=True).to(dtype=X.dtype, device=X.device)
+      R = matrixR(L2, self.d, ex=True).to(dtype=X.dtype, device=X.device)
       
       # Linear transforms.
       q = torch.matmul(X, self.Wq).view(N,L1,h,-1).transpose(1,2)
@@ -263,8 +262,12 @@ class SeqData:
       with open(path) as f:
          self.data = [line.rstrip() for line in f if is_clean(line)]
 
-   def mutf(self, seq, pm=.1, pd=.1, pi=.1, outlen=200):
-      '''Mutations, deletions and insertions set to 0.1 by default.'''
+   def mutf(self, seq, pm=.15, pd=.15, pi=.15, outlen=200):
+      '''Mutations, deletions and insertions set to 0-0.15 by default.'''
+      # Draw probabilities at random.
+      pm = pm *random.random()
+      pd = pd *random.random()
+      pi = pi *random.random()
       # Deletions.
       seq = [a for a in seq if random.random() > pd]
       # Mutations.
@@ -289,13 +292,13 @@ class SeqData:
       else: # The sequence fits completely.
          return ''.join(prefix) + seq + ''.join(suffix)
 
-   def batches(self, pm=.1, pd=.1, pi=.1, btchsz=64):
-      '''Mutations, deletions and insertions set to 0.1 by default.'''
+   def batches(self, pm=.15, pd=.15, pi=.15, btchsz=64):
+      '''Mutations, deletions and insertions set to 0-0.15 by default.'''
       # Produce batches in index format (i.e. not text).
       idx = np.arange(len(self.data))
       to_idx = lambda s: torch.LongTensor([self.vocab[a] for a in s])
       # Define a generator for convenience.
-      for _ in range(100):
+      for _ in range(512):
          rndset = random.choices(self.data, k=btchsz)
          data = [to_idx(self.mutf(seq, pm, pd, pi)) for seq in rndset]
          yield torch.nn.utils.rnn.pad_sequence(data, batch_first=True)
@@ -315,7 +318,6 @@ if __name__ == "__main__":
    )
 
    tRNAdata = SeqData('yeast_tRNA.txt', vocab)
-   #model.load_state_dict(torch.load('model_epoch_3.tch'))
 
    # Do it with CUDA if possible.
    device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -331,7 +333,7 @@ if __name__ == "__main__":
    loss_fun = nn.BCELoss(reduction='mean')
 
    nbtch = 0
-   for epoch in range(20):
+   for epoch in range(50):
       epoch_loss = 0.
       for batch in tRNAdata.batches():
          nbtch += 1
@@ -355,4 +357,4 @@ if __name__ == "__main__":
 
       sys.stderr.write('Epoch %d, loss: %f\n' % (epoch+1, epoch_loss))
       if (epoch+1) % 10 == 0:
-         torch.save(model.state_dict(), 'model_epoch_%d.tch' % (epoch+1))
+         torch.save(model.state_dict(), 't_RNA_model_epoch_%d.tch' % (epoch+1))

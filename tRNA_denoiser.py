@@ -287,45 +287,70 @@ class EncoderDecoder(nn.Module):
 
 
 '''
-DNA and proteins
+DNA.
 '''
 
-DNA_vocab  = { ' ': 0, 'A':1, 'C':2, 'G':3, 'T':4 }
+vocab = {
+   ' ':0, 'A':1, 'C':2, 'G':3, 'T':4, 'a':5, 'c':6, 'g':7, 't':8,
+}
 
-prot_vocab = { ' ':0, 'A':1, 'C':2, 'D':3, 'E':4, 'F':5, 'G':6, 'H':7,
-       'I':8, 'K':9, 'L':10, 'M':11, 'N':12, 'P':13, 'Q':14, 'R':15,
-       'S':16, 'T':17, 'V':18, 'W':19, 'Y':20, '_':21 } # '_' = STOP.
+class SeqData:
 
-def to_idx(seqlist, vocab):
-   # Cast to torch long integers for embeddings.
-   return torch.LongTensor([[vocab[x] for x in seq] for seq in seqlist])
+   def __init__(self, path, vocab):
+      self.vocab = vocab
+      # Remove lines with unknown characters.
+      is_clean = lambda s: set(s.rstrip()).issubset(vocab)
+      with open(path) as f:
+         self.data = [line.rstrip() for line in f if is_clean(line)]
 
-def random_DNA(nseq, lseq):
-   DNA = lambda n: ''.join([random.choice('GATC') for _ in range(n)])
-   return [DNA(lseq) for _ in range(nseq)]
+   def mutf(self, oseq, pm=.15, pd=.15, pi=.15, outlen=200):
+      '''Mutations, deletions and insertions set to 0-0.15 by default.'''
+      # Draw probabilities at random.
+      pm = pm *random.random()
+      pd = pd *random.random()
+      pi = pi *random.random()
+      # Deletions.
+      seq = [a for a in oseq if random.random() > pd]
+      # Mutations.
+      M = {'A': 'CGT', 'C': 'AGT', 'G': 'ACT', 'T': 'ACG'}
+      mut = lambda a: a if random.random() > pm else random.choice(M[a])
+      seq = [mut(a) for a in seq]
+      # Insertions (only 1 nucleotide).
+      I = 'ACGT'
+      ins = lambda a: a if random.random() > pi else a + random.choice(I)
+      seq = [ins(a) for a in seq]
+      # Shift within 'outlen'.
+      seq = ''.join(seq)
+      half1 = len(seq)//2
+      half2 = (len(seq)+1)//2
+      pos = random.randint(0,outlen-1) # Position of the sequence center.
+      prefix = [random.choice(I) for _ in range(pos-half1)]
+      suffix = [random.choice(I) for _ in range(outlen-pos-half2)]
+      if pos < half1:
+         i = seq[half1-pos:] + ''.join(suffix)
+         o = oseq[half1-pos:].lower() + ''.join(suffix)
+      elif pos > outlen-half2:
+         i = ''.join(prefix) + seq[:outlen-pos-half2]
+         o = ''.join(prefix) + oseq[:outlen-pos-half2].lower()
+      else: # The sequence fits completely.
+         i = ''.join(prefix) + seq + ''.join(suffix)
+         o = ''.join(prefix) + oseq.lower() + ''.join(suffix)
+      return i,o
 
-def translate(seqlist):
-   table = { 
-        'ATA':'I', 'ATC':'I', 'ATT':'I', 'ATG':'M', 
-        'ACA':'T', 'ACC':'T', 'ACG':'T', 'ACT':'T', 
-        'AAC':'N', 'AAT':'N', 'AAA':'K', 'AAG':'K', 
-        'AGC':'S', 'AGT':'S', 'AGA':'R', 'AGG':'R',                  
-        'CTA':'L', 'CTC':'L', 'CTG':'L', 'CTT':'L', 
-        'CCA':'P', 'CCC':'P', 'CCG':'P', 'CCT':'P', 
-        'CAC':'H', 'CAT':'H', 'CAA':'Q', 'CAG':'Q', 
-        'CGA':'R', 'CGC':'R', 'CGG':'R', 'CGT':'R', 
-        'GTA':'V', 'GTC':'V', 'GTG':'V', 'GTT':'V', 
-        'GCA':'A', 'GCC':'A', 'GCG':'A', 'GCT':'A', 
-        'GAC':'D', 'GAT':'D', 'GAA':'E', 'GAG':'E', 
-        'GGA':'G', 'GGC':'G', 'GGG':'G', 'GGT':'G', 
-        'TCA':'S', 'TCC':'S', 'TCG':'S', 'TCT':'S', 
-        'TTC':'F', 'TTT':'F', 'TTA':'L', 'TTG':'L', 
-        'TAC':'Y', 'TAT':'Y', 'TAA':'_', 'TAG':'_', 
-        'TGC':'C', 'TGT':'C', 'TGA':'_', 'TGG':'W', 
-   }
-   codons = lambda seq: [seq[i:i+3] for i in range(0,len(seq),3)]
-   transl = lambda seq: ''.join([table[cod] for cod in codons(seq)])
-   return [transl(seq) for seq in seqlist]
+   def batches(self, pm=.15, pd=.15, pi=.15, btchsz=64):
+      '''Mutations, deletions and insertions set to 0-0.15 by default.'''
+      # Produce batches in index format (i.e. not text).
+      idx = np.arange(len(self.data))
+      to_idx = lambda s: torch.LongTensor([self.vocab[a] for a in s])
+      # Define a generator for convenience.
+      for _ in range(512):
+         rndset = random.choices(self.data, k=btchsz)
+         pairs = [self.mutf(seq, pm, pd, pi) for seq in rndset]
+         i_seq = [to_idx(a) for a,b in pairs]
+         o_seq = [to_idx(b) for a,b in pairs]
+         i = torch.nn.utils.rnn.pad_sequence(i_seq, batch_first=True)
+         o = torch.nn.utils.rnn.pad_sequence(o_seq, batch_first=True)
+         yield i,o
 
 
 if __name__ == "__main__":
@@ -334,13 +359,15 @@ if __name__ == "__main__":
       sys.stderr.write("Requires Python 3\n")
 
    model = EncoderDecoder(
-      N = 2,                    # Number of layers.
-      h = 4,                    # Number of attention heads.
-      d_model = 128,            # Hidden dimension.
-      d_ffn = 256,              # Boom dimension.
-      i_nwrd = len(DNA_vocab),  # Input alphabet (DNA).
-      o_nwrd = len(prot_vocab)  # Output alphabet (protein).
+      N = 2,                # Number of layers.
+      h = 4,                # Number of attention heads.
+      d_model = 128,        # Hidden dimension.
+      d_ffn = 256,          # Boom dimension.
+      i_nwrd = len(vocab),  # Input alphabet (DNA).
+      o_nwrd = len(vocab)   # Output alphabet (DNA).
    )
+
+   tRNAdata = SeqData('yeast_tRNA.txt', vocab)
 
    # Do it with CUDA if possible.
    device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -348,7 +375,7 @@ if __name__ == "__main__":
    
    lr  = 0.0001 # The celebrated learning rate.
 
-   # Optimizer (Lookahead with Lamb).
+   # Optimizer (warmup and linear decay or LR)
    baseopt = Lamb(model.parameters(),
          lr=lr, weight_decay=0.01, betas=(.9, .999), adam=True)
    opt = Lookahead(base_optimizer=baseopt, k=5, alpha=0.8)
@@ -356,23 +383,16 @@ if __name__ == "__main__":
    loss_fun = nn.CrossEntropyLoss(reduction='mean')
 
    nbtch = 0
-   for epoch in range(20):
+   for epoch in range(50):
       epoch_loss = 0.
-      # Learning rate decay.
-      if epoch >= 10: lr = 0.0001
-      for batch in range(256):
+      for batch in tRNAdata.batches():
          nbtch += 1
 
-         # Generate the batch data on the fly. Take 32 DNA sequences
-         # of size 72 and translate them into proteins of size 24.
-         DNA = random_DNA(32, 72)
-         prot = translate(DNA)
-         
-         i_batch = to_idx(DNA, DNA_vocab).to(device)
-         o_batch = to_idx(prot, prot_vocab).to(device)
+         i_batch = batch[0].to(device)
+         o_batch = batch[1].to(device)
 
          z = model(i_batch, o_batch)
-         loss = loss_fun(z.view(-1,len(prot_vocab)), o_batch.view(-1))
+         loss = loss_fun(z.view(-1,len(vocab)), o_batch.view(-1))
 
          # Update.
          opt.zero_grad()

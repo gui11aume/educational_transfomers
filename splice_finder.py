@@ -129,10 +129,9 @@ class RelativeAttention(nn.Module):
       N  = X.shape[0]   # Batch size.
       L1 = X.shape[1]   # Text length (X).
       L2 = Y.shape[1]   # Text length (Y).
-      L  = max(L1, L2)  # Longer text length.
 
       # Relative position.
-      R = matrixR(L, self.d, ex=True).to(dtype=X.dtype, device=X.device)
+      R = matrixR(L2, self.d, ex=True).to(dtype=X.dtype, device=X.device)
       
       # Linear transforms.
       q = torch.matmul(X, self.Wq).view(N,L1,h,-1).transpose(1,2)
