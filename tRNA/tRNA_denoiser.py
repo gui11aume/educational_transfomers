@@ -291,7 +291,8 @@ DNA.
 '''
 
 vocab = {
-   ' ':0, 'A':1, 'C':2, 'G':3, 'T':4, 'a':5, 'c':6, 'g':7, 't':8,
+   ' ':0, 'A':1, 'C':2, 'G':3, 'T':4,
+   'a':5, 'c':6, 'g':7, 't':8, 'START':9
 }
 
 class SeqData:
@@ -319,35 +320,22 @@ class SeqData:
       I = 'ACGT'
       ins = lambda a: a if random.random() > pi else a + random.choice(I)
       seq = [ins(a) for a in seq]
-      # Shift within 'outlen'.
-      seq = ''.join(seq)
-      half1 = len(seq)//2
-      half2 = (len(seq)+1)//2
-      pos = random.randint(0,outlen-1) # Position of the sequence center.
-      prefix = [random.choice(I) for _ in range(pos-half1)]
-      suffix = [random.choice(I) for _ in range(outlen-pos-half2)]
-      if pos < half1:
-         i = seq[half1-pos:] + ''.join(suffix)
-         o = oseq[half1-pos:].lower() + ''.join(suffix)
-      elif pos > outlen-half2:
-         i = ''.join(prefix) + seq[:outlen-pos-half2]
-         o = ''.join(prefix) + oseq[:outlen-pos-half2].lower()
-      else: # The sequence fits completely.
-         i = ''.join(prefix) + seq + ''.join(suffix)
-         o = ''.join(prefix) + oseq.lower() + ''.join(suffix)
-      return i,o
+      # Done.
+      return ''.join(seq)
 
    def batches(self, pm=.15, pd=.15, pi=.15, btchsz=64):
       '''Mutations, deletions and insertions set to 0-0.15 by default.'''
       # Produce batches in index format (i.e. not text).
       idx = np.arange(len(self.data))
       to_idx = lambda s: torch.LongTensor([self.vocab[a] for a in s])
+      mess = lambda s: ''.join(random.choice('GATC') for _ in s)
       # Define a generator for convenience.
       for _ in range(512):
-         rndset = random.choices(self.data, k=btchsz)
-         pairs = [self.mutf(seq, pm, pd, pi) for seq in rndset]
-         i_seq = [to_idx(a) for a,b in pairs]
-         o_seq = [to_idx(b) for a,b in pairs]
+         o_seq = random.choices(self.data, k=btchsz)
+         i_seq = [self.mutf(seq, pm, pd, pi) for seq in o_seq]
+         junks = [mess(s) for s in o_seq] # Junk stuff.
+         i_seq = [to_idx(s) for s in i_seq + junks]
+         o_seq = [to_idx(s) for s in o_seq + junks]
          i = torch.nn.utils.rnn.pad_sequence(i_seq, batch_first=True)
          o = torch.nn.utils.rnn.pad_sequence(o_seq, batch_first=True)
          yield i,o
@@ -359,14 +347,15 @@ if __name__ == "__main__":
       sys.stderr.write("Requires Python 3\n")
 
    model = EncoderDecoder(
-      N = 2,                # Number of layers.
-      h = 4,                # Number of attention heads.
-      d_model = 128,        # Hidden dimension.
-      d_ffn = 256,          # Boom dimension.
+      N = 4,                # Number of layers.
+      h = 8,                # Number of attention heads.
+      d_model = 256,        # Hidden dimension.
+      d_ffn = 512,          # Boom dimension.
       i_nwrd = len(vocab),  # Input alphabet (DNA).
       o_nwrd = len(vocab)   # Output alphabet (DNA).
    )
 
+   model.load_state_dict(torch.load('model_epoch_40.tch'))
    tRNAdata = SeqData('yeast_tRNA.txt', vocab)
 
    # Do it with CUDA if possible.
@@ -388,6 +377,7 @@ if __name__ == "__main__":
       for batch in tRNAdata.batches():
          nbtch += 1
 
+         # Text to denoise.
          i_batch = batch[0].to(device)
          o_batch = batch[1].to(device)
 
@@ -403,4 +393,4 @@ if __name__ == "__main__":
 
       sys.stderr.write('Epoch %d, loss: %f\n' % (epoch+1, epoch_loss))
       if (epoch+1) % 10 == 0:
-         torch.save(model.state_dict(), 'model_epoch_%d.tch' % (epoch+1))
+         torch.save(model.state_dict(), 'model_epoch_%d.tch' % (epoch+41))

@@ -31,7 +31,8 @@ if __name__ == '__main__':
          fgt = [seq[i:i+200] for i in range(0,len(seq),200)]
          for seq in fgt:
             x = to_idx(seq).view(1,-1).to('cuda')
-            out = F.softmax(model(x), -1)
+            with torch.no_grad():
+               out = F.softmax(model(x), -1)
             for i in range(len(seq)):
                if out[0,i,1] < .5:
                   sys.stdout.write('%s' % seq[i].lower())

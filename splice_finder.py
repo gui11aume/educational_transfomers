@@ -296,8 +296,8 @@ if __name__ == "__main__":
          lr=lr, weight_decay=0.01, betas=(.9, .999), adam=True)
    opt = Lookahead(base_optimizer=baseopt, k=5, alpha=0.8)
 
-   # Give weight 50 to class 1 (junction: yes). Explanation below.
-   clweight = torch.tensor([1.,50.]).to(device)
+   # Give weight 100 to class 1 (junction: yes). Explanation below.
+   clweight = torch.tensor([1.,100.]).to(device)
    loss_fun = nn.CrossEntropyLoss(weight=clweight, reduction='mean')
 
    nbtch = 0
@@ -306,15 +306,24 @@ if __name__ == "__main__":
       for batch in splicedata.batches():
          nbtch += 1
 
+         rnd = lambda n: torch.LongTensor(random.choices([1,2,3,4], k=n))
+
          # Shift sequences by up to 50 bp.
          shift = [random.randint(0,49) for _ in range(batch.shape[0])]
-         trgt = torch.zeros(batch.shape).long().to(device)
+         trgt = torch.zeros(batch.shape).long()
          trgt[:,148] = 1 # The "GT" junction is always at position 148.
-         shft_batch = [batch[i:i+1,s:s+250] for i,s in enumerate(shift)]
-         shft_trgt = [trgt[i:i+1,s:s+250] for i,s in enumerate(shift)]
+         shft_batch = [batch[i:i+1,s:s+249] for i,s in enumerate(shift)]
+         shft_trgt = [trgt[i:i+1,s:s+249] for i,s in enumerate(shift)]
+         # For negative examples, grab another batch, delete the boundary
+         # and join the two ends. We do this to prevent the model from
+         # learning too much the sequence biases from the left and the
+         # right of the splice junction.
+         neg = next(splicedata.batches())
+         neg = torch.cat([neg[:,:125], neg[:,175:]], 1)
+         zer = torch.zeros_like(neg)
 
-         batch = torch.cat(shft_batch, 0).to(device)
-         trgt = torch.cat(shft_trgt, 0).to(device)
+         batch = torch.cat(shft_batch + [neg], 0).to(device)
+         trgt = torch.cat(shft_trgt + [zer], 0).to(device)
 
          z = model(batch)
          # Compute loss only in the range where the junction can be.
