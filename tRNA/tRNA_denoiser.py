@@ -259,6 +259,9 @@ class EncoderDecoder(nn.Module):
          RelativeDecoderBlock(h, d_model, d_ffn, dropout=dropout) \
                for _ in range(N)])
 
+      # Class head for pre-training.
+      self.cls = nn.Linear(d_model, 13)
+
       # Final layer (decoder side) for reconstruction.
       self.last = nn.Linear(d_model, o_nwrd)
 
@@ -268,22 +271,31 @@ class EncoderDecoder(nn.Module):
       start = torch.zeros(N,1).long().to(batch.device)
       return torch.cat([start, batch[:,:-1]], dim=-1)
 
-   def forward(self, i_batch, o_batch, mask=None):
-      # Apply input and output embeddings.
-      i_embeddings = self.i_emb(i_batch)
-      o_embeddings = self.o_emb(self.shift(o_batch))
+   def forward(self, i_batch, o_batch=None, mask=None, pretrain=False):
+      # Pretrain mode: guess the class.
+      if pretrain:
+         i_embeddings = self.i_emb(i_batch)
+         i = self.do(i_embeddings)
+         # Attention layers (encoder).
+         for layer in self.EncoderLayers:
+            i = layer(i)
+         return self.cls(i)
+      # Fine-tuning mode: translate.
+      else:
+         i_embeddings = self.i_emb(i_batch)
+         o_embeddings = self.o_emb(self.shift(o_batch))
 
-      i = self.do(i_embeddings)
-      o = self.do(o_embeddings)
+         i = self.do(i_embeddings)
+         o = self.do(o_embeddings)
 
-      # Attention layers (encoder).
-      for layer in self.EncoderLayers:
-         i = layer(i)
-      # Attention layers (decoder).
-      for layer in self.DecoderLayers:
-         o = layer(o,i)
+         # Attention layers (encoder).
+         for layer in self.EncoderLayers:
+            i = layer(i)
+         # Attention layers (decoder).
+         for layer in self.DecoderLayers:
+            o = layer(o,i)
 
-      return self.last(o)
+         return self.last(o)
 
 
 '''
@@ -292,7 +304,13 @@ DNA.
 
 vocab = {
    ' ':0, 'A':1, 'C':2, 'G':3, 'T':4,
-   'a':5, 'c':6, 'g':7, 't':8, 'START':9
+   'a':5, 'c':6, 'g':7, 't':8,
+   # Special symbols
+   'START':9, 'CLS':10,
+   # Sequence symbols.
+   11:11, 12:12, 13:13, 14:14, 15:15,
+   16:16, 17:17, 18:18, 19:19, 20:20,
+   21:21, 22:22,
 }
 
 class SeqData:
@@ -331,14 +349,16 @@ class SeqData:
       mess = lambda s: ''.join(random.choice('GATC') for _ in s)
       # Define a generator for convenience.
       for _ in range(512):
-         o_seq = random.choices(self.data, k=btchsz)
-         i_seq = [self.mutf(seq, pm, pd, pi) for seq in o_seq]
-         junks = [mess(s) for s in o_seq] # Junk stuff.
+         seqid = random.choices(range(len(self.data)), k=btchsz)
+         o_seq = [[s+11] for s in seqid]
+         i_seq = [self.mutf(self.data[s], pm, pd, pi) for s in seqid]
+         junks = [mess(self.data[s]) for s in seqid] # Junk stuff.
          i_seq = [to_idx(s) for s in i_seq + junks]
          o_seq = [to_idx(s) for s in o_seq + junks]
          i = torch.nn.utils.rnn.pad_sequence(i_seq, batch_first=True)
          o = torch.nn.utils.rnn.pad_sequence(o_seq, batch_first=True)
-         yield i,o
+         seqid = torch.LongTensor(seqid + [12] * len(seqid))
+         yield i,o,seqid
 
 
 if __name__ == "__main__":
@@ -355,7 +375,6 @@ if __name__ == "__main__":
       o_nwrd = len(vocab)   # Output alphabet (DNA).
    )
 
-   model.load_state_dict(torch.load('model_epoch_40.tch'))
    tRNAdata = SeqData('yeast_tRNA.txt', vocab)
 
    # Do it with CUDA if possible.
@@ -369,7 +388,43 @@ if __name__ == "__main__":
          lr=lr, weight_decay=0.01, betas=(.9, .999), adam=True)
    opt = Lookahead(base_optimizer=baseopt, k=5, alpha=0.8)
 
-   loss_fun = nn.CrossEntropyLoss(reduction='mean')
+
+   # Pre-training (5 epochs).
+   clweight = torch.FloatTensor([4,4,4,4,4,4,4,4,4,4,4,4,1]).to(device)
+   loss_fun = nn.CrossEntropyLoss(weight=clweight, reduction='mean')
+
+   nbtch = 0
+   for epoch in range(5):
+      epoch_loss = 0.
+      for batch in tRNAdata.batches():
+         nbtch += 1
+
+         # Text to classify.
+         i_batch = batch[0].to(device)
+         cls = batch[2].to(device)
+
+         # Prepend 'CLS' token.
+         tok = torch.LongTensor([vocab['CLS']]).to(device)
+         i_batch = torch.cat([tok.repeat(i_batch.shape[0],1), i_batch], 1)
+
+         z = model(i_batch, pretrain=True)
+         loss = loss_fun(z[:,0,:].view(-1,13), cls)
+
+         # Update.
+         opt.zero_grad()
+         loss.backward()
+         opt.step()
+
+         epoch_loss += float(loss)
+
+      sys.stderr.write('Epoch %d, loss: %f\n' % (epoch+1, epoch_loss))
+      if (epoch+1) % 5 == 0:
+         torch.save(model.state_dict(), 'pre_trained_model_epoch_%d.tch' % (epoch+1))
+
+   # Fine-tuning.
+   clweight = torch.FloatTensor([1,1,1,1,1,1,1,1,1,1,1,
+      50,50,50,50,50,50,50,50,50,50,50,50]).to(device)
+   loss_fun = nn.CrossEntropyLoss(weight=clweight, reduction='mean')
 
    nbtch = 0
    for epoch in range(50):
@@ -381,6 +436,7 @@ if __name__ == "__main__":
          i_batch = batch[0].to(device)
          o_batch = batch[1].to(device)
 
+         import pdb; pdb.set_trace()
          z = model(i_batch, o_batch)
          loss = loss_fun(z.view(-1,len(vocab)), o_batch.view(-1))
 
@@ -393,4 +449,4 @@ if __name__ == "__main__":
 
       sys.stderr.write('Epoch %d, loss: %f\n' % (epoch+1, epoch_loss))
       if (epoch+1) % 10 == 0:
-         torch.save(model.state_dict(), 'model_epoch_%d.tch' % (epoch+41))
+         torch.save(model.state_dict(), 'model_epoch_%d.tch' % (epoch+1))

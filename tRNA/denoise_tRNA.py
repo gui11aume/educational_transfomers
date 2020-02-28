@@ -18,10 +18,8 @@ if __name__ == "__main__":
       o_nwrd = len(vocab)   # Output alphabet (DNA).
    )
 
-   tRNAdata = SeqData('yeast_tRNA.txt', vocab)
-
    model.load_state_dict(torch.load(sys.argv[1]))
-   model.eval()
+   tRNAdata = SeqData('yeast_tRNA.txt', vocab)
 
    # Do it with CUDA if possible.
    if torch.cuda.is_available():
@@ -30,21 +28,23 @@ if __name__ == "__main__":
    else:
       device = 'cpu'
    
+   model.eval()
    # Generate the data on the fly.
    for batch in tRNAdata.batches():
       # Text to denoise.
-      i_batch = batch[0][:4,:].to(device)
-      o_batch = torch.zeros(4,150).long().to(device)
+      i_batch = batch[0].to(device)
+      o_batch = batch[1].to(device)
+      o_batch[:,:] = 0
    
-      for _ in range(150):
+      for _ in range(o_batch.shape[1]):
          with torch.no_grad():
             z = model(i_batch, o_batch)
          probs = F.softmax(z[:,_,:], dim=-1)
          smpl = torch.distributions.Categorical(probs).sample()
          o_batch[:,_] = smpl
       # Print sequences.
-      toseq = lambda t: ''.join([' ACGT'[x] for x in t])
-      for _ in range(4):
+      toseq = lambda t: ''.join([' ACGTacgt![0123456789+*'[x] for x in t])
+      for _ in range(batch[0].shape[0]):
          print(toseq(i_batch[_,:]))
          print(toseq(o_batch[_,:]))
          print(toseq(batch[1][_,:]))
