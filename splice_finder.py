@@ -85,7 +85,7 @@ class RelativeAttention(nn.Module):
             M = M.repeat_interleave(L//L2, dim=-1)
          else:
             M = M.repeat_interleave(1+L//L2, dim=-1)
-            idx = np.linspace(0, M.shape[-1]-1, L).astype(int)
+            idx = np.linspace(0, M.shape[-1]-1, 2*L-1).astype(int)
             M = M[:,:,:,idx]
       # M has size (L x 2L-1). Split it in two blocks of size (. x L)
       # Note: the middle column is present in both blocks.
