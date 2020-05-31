@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from optimizers import Lamb, Lookahead # Local file.
 
+
 '''
 Relative positional encoding.
 '''
@@ -123,7 +124,7 @@ class RelativeAttention(nn.Module):
            Oh  ~  (Batch, h, d_model/h, L)
             O  ~  (Batch, L, d_model)
       '''
-      
+
       h  = self.h       # Number of heads.
       H  = self.d // h  # Head dimension.
       N  = X.shape[0]   # Batch size.
@@ -192,10 +193,10 @@ class FeedForwardNet(nn.Module):
 
    def forward(self, X):
       return self.ln(X + self.do(self.ff(X)))
-   
+
 
 ''' 
-Encoder blocks.
+Encoder and Decoder blocks.
 '''
 
 class RelativeEncoderBlock(nn.Module):
@@ -211,8 +212,31 @@ class RelativeEncoderBlock(nn.Module):
       return self.ffn(self.sattn(X, X, mask))
 
 
-class SeqFinder(nn.Module):
-   def __init__(self, N, h, d_model, d_ffn, nwrd, dropout=0.1):
+class RelativeDecoderBlock(nn.Module):
+   def __init__(self, h, d_model, d_ffn, dropout=0.1):
+      super().__init__()
+      self.h = h
+      self.d = d_model
+      self.f = d_ffn
+      self.sattn = RelativeAttention(h, d_model, dropout=dropout)
+      self.oattn = RelativeAttention(h, d_model, dropout=dropout)
+      self.ffn   = FeedForwardNet(d_model, d_ffn, dropout=dropout)
+
+   def default_mask(self, X):
+      # By default we mask the future.
+      # Note: the positions marked as 0 are masked.
+      L = X.shape[-2] # Text length.
+      return torch.ones(L,L, device=X.device).tril()
+      
+   def forward(self, X, Y, mask=None):
+      mask = mask if mask is not None else self.default_mask(X)
+      X = self.sattn(X, X, mask)  # Self (masked) attention.
+      X = self.oattn(X, Y)        # Other (unmasked) attention.
+      return self.ffn(X)
+
+
+class EncoderDecoder(nn.Module):
+   def __init__(self, N, h, d_model, d_ffn, i_nwrd, o_nwrd, dropout=0.1):
       super().__init__()
 
       # Model parameters.
@@ -221,24 +245,45 @@ class SeqFinder(nn.Module):
       self.h = h          # Number of heads.
       self.d_ffn = d_ffn  # Boom dimension.
 
-      # Text embedding transformations
-      self.embed = nn.Embedding(nwrd, d_model)
+      # Text embedding transformations.
+      self.i_emb = nn.Embedding(i_nwrd, d_model)
+      self.o_emb = nn.Embedding(o_nwrd, d_model)
       self.do    = nn.Dropout(p=dropout)
 
-      # Self-attention layers
+      # Self-attention layers of the encoder.
       self.EncoderLayers = nn.ModuleList([
          RelativeEncoderBlock(h, d_model, d_ffn, dropout=dropout) \
                for _ in range(N)])
+      # Self/other attention layers of the decoder.
+      self.DecoderLayers = nn.ModuleList([
+         RelativeDecoderBlock(h, d_model, d_ffn, dropout=dropout) \
+               for _ in range(N)])
 
-      # Final layers for reconstruction.
-      self.last = nn.Linear(d_model, 2)
+      # Final layer (decoder side) for reconstruction.
+      self.last = nn.Linear(d_model, o_nwrd)
 
-   def forward(self, batch, mask=None):
-      # Straightforward pass through the layers.
-      X = self.do(self.embed(batch))
+   def shift(self, batch):
+      # Prepend symbol 0 and shift sequences right.
+      N = batch.shape[0] # Batch size.
+      start = torch.zeros(N,1).long().to(batch.device)
+      return torch.cat([start, batch[:,:-1]], dim=-1)
+
+   def forward(self, i_batch, o_batch=None, mask=None):
+      # Pretrain mode: guess the class.
+      i_embeddings = self.i_emb(i_batch)
+      o_embeddings = self.o_emb(self.shift(o_batch))
+
+      i = self.do(i_embeddings)
+      o = self.do(o_embeddings)
+
+      # Attention layers (encoder).
       for layer in self.EncoderLayers:
-         X = layer(X)
-      return self.last(X)
+         i = layer(i)
+      # Attention layers (decoder).
+      for layer in self.DecoderLayers:
+         o = layer(o,i)
+
+      return self.last(o)
 
 
 '''
@@ -247,8 +292,10 @@ DNA.
 
 vocab = {
    ' ':0, 'A':1, 'C':2, 'G':3, 'T':4,
+   'a':5, 'c':6, 'g':7, 't':8,
+   # Special symbols
+   'START':9,
 }
-
 
 class SeqData:
 
@@ -280,31 +327,31 @@ class SeqData:
       half1 = len(seq)//2
       half2 = (len(seq)+1)//2
       pos = random.randint(0,outlen-1) # Position of the sequence center.
-      prefix = [random.choice(I) for _ in range(pos-half1)]
-      suffix = [random.choice(I) for _ in range(outlen-pos-half2)]
+      prefix = [random.choice('gatc') for _ in range(pos-half1)]
+      suffix = [random.choice('gatc') for _ in range(outlen-pos-half2)]
       if pos < half1:
-         seqf = seq[half1-pos:] + ''.join(suffix)
-         posf = [1] * len(seq[half1-pos:]) + [0] * len(suffix)
+         return seq[half1-pos:] + ''.join(suffix)
       elif pos > outlen-half2:
-         seqf = ''.join(prefix) + seq[:outlen-pos-half2]
-         posf = [0] * len(prefix) + [1] * len(seq[:outlen-pos-half2])
+         return ''.join(prefix) + seq[:outlen-pos-half2]
       else: # The sequence fits completely.
-         seqf = ''.join(prefix) + seq + ''.join(suffix)
-         posf = [0] * len(prefix) + [1] * len(seq) + [0] * len(suffix)
-      return seqf, torch.LongTensor([posf])
+         return ''.join(prefix) + seq + ''.join(suffix)
 
-   def batches(self, pm=.15, pd=.15, pi=.15, btchsz=64):
+   def batches(self, pm=.15, pd=.15, pi=.15, btchsz=16):
       '''Mutations, deletions and insertions set to 0-0.15 by default.'''
       # Produce batches in index format (i.e. not text).
       idx = np.arange(len(self.data))
-      to_idx = lambda s: torch.LongTensor([[self.vocab[a] for a in s]])
+      to_idx = lambda s: torch.LongTensor([self.vocab[a] for a in s])
+      mess = lambda s: ''.join(random.choice('gatc') for _ in s)
       # Define a generator for convenience.
       for _ in range(512):
-         rndset = random.choices(self.data, k=btchsz)
-         pairs = [self.mutf(seq, pm, pd, pi) for seq in rndset]
-         seqf = torch.cat([to_idx(seq) for seq,_ in pairs], dim=0)
-         posf = torch.cat([z for _,z in pairs], dim=0)
-         yield seqf, posf
+         seqid = random.choices(range(len(self.data)), k=btchsz)
+         seq = [self.mutf(self.data[s], pm, pd, pi) for s in seqid]
+         junks = [mess(s) for s in seq] # Junk stuff.
+         i_seq = [to_idx(s.lower()) for s in seq + junks]
+         o_seq = [to_idx(s) for s in seq + junks]
+         i = torch.nn.utils.rnn.pad_sequence(i_seq, batch_first=True)
+         o = torch.nn.utils.rnn.pad_sequence(o_seq, batch_first=True)
+         yield i,o
 
 
 if __name__ == "__main__":
@@ -312,13 +359,17 @@ if __name__ == "__main__":
    if sys.version_info < (3,0):
       sys.stderr.write("Requires Python 3\n")
 
-   model = SeqFinder(
-      N = 4,             # Number of layers.
-      h = 8,             # Number of attention heads.
-      d_model = 128,     # Hidden dimension.
-      d_ffn = 256,       # Boom dimension.
-      nwrd = len(vocab)  # Input alphabet (DNA).
+   model = EncoderDecoder(
+      N = 4,                # Number of layers.
+      h = 8,                # Number of attention heads.
+      d_model = 256,        # Hidden dimension.
+      d_ffn = 512,          # Boom dimension.
+      i_nwrd = len(vocab),  # Input alphabet (DNA).
+      o_nwrd = len(vocab)   # Output alphabet (DNA).
    )
+
+   model.load_state_dict(torch.load('model_epoch_50.tch'))
+   model.train()
 
    tRNAdata = SeqData('yeast_tRNA.txt', vocab)
 
@@ -328,28 +379,25 @@ if __name__ == "__main__":
    
    lr  = 0.0001 # The celebrated learning rate.
 
-   # Optimizer (warmup and linear decay or LR)
+   # Optimizer (Lookahead on Lamb).
    baseopt = Lamb(model.parameters(),
          lr=lr, weight_decay=0.01, betas=(.9, .999), adam=True)
    opt = Lookahead(base_optimizer=baseopt, k=5, alpha=0.8)
 
-   clweight = torch.tensor([1.,3.]).to(device)
-   loss_fun = nn.CrossEntropyLoss(weight=clweight, reduction='mean')
+   loss_fun = nn.CrossEntropyLoss(reduction='mean')
 
    nbtch = 0
-   for epoch in range(50):
+   for epoch in range(100):
       epoch_loss = 0.
-      for seq,pos in tRNAdata.batches():
+      for batch in tRNAdata.batches():
          nbtch += 1
 
-         # Add equal amount of random sequences.
-         rndseq = torch.LongTensor(seq.shape).random_(1,5)
-         batch = torch.cat([seq, rndseq], dim=0).to(device)
-         randz = torch.zeros(seq.shape).long().to(device)
-         trgt = torch.cat([pos.to(device), randz], dim=0)
+         # Text to denoise.
+         i_batch = batch[0].to(device)
+         o_batch = batch[1].to(device)
 
-         z = model(batch)
-         loss = loss_fun(z.view(-1,2), trgt.view(-1))
+         z = model(i_batch, o_batch)
+         loss = loss_fun(z.view(-1,len(vocab)), o_batch.view(-1))
 
          # Update.
          opt.zero_grad()
@@ -359,5 +407,4 @@ if __name__ == "__main__":
          epoch_loss += float(loss)
 
       sys.stderr.write('Epoch %d, loss: %f\n' % (epoch+1, epoch_loss))
-      if (epoch+1) % 10 == 0:
-         torch.save(model.state_dict(), 't_RNA_model_epoch_%d.tch' % (epoch+1))
+      torch.save(model.state_dict(), 'model_epoch_%d.tch' % (epoch+1))

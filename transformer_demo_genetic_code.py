@@ -177,7 +177,7 @@ class RelativeAttention(nn.Module):
 
 
 '''
-Feed foward layer.
+Feed forward layer.
 '''
 
 class FeedForwardNet(nn.Module):
